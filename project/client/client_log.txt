@@ -1,0 +1,20 @@
+[2024-07-27 16:40:56.137246/update_server]:test
+[2024-07-27 16:40:56.141363/update_server]:recv version check message!
+[2024-07-27 16:40:56.142099/update_server]:prepare auto update!
+[2024-07-27 16:40:56.142139/update_server]:start send upate msg
+[2024-07-27 16:40:56.142350/update_server]:end send upate msg!
+[2024-07-27 16:41:12.544621/update_server]:test
+[2024-07-27 16:41:12.561970/update_server]:recv version check message!
+[2024-07-27 16:41:12.562765/update_server]:prepare auto update!
+[2024-07-27 16:41:12.562810/update_server]:start send upate msg
+[2024-07-27 16:41:12.562963/update_server]:end send upate msg!
+[2024-07-27 16:41:26.176113/update_server]:test
+[2024-07-27 16:41:26.181902/update_server]:recv version check message!
+[2024-07-27 16:41:26.182661/update_server]:prepare auto update!
+[2024-07-27 16:41:26.182707/update_server]:start send upate msg
+[2024-07-27 16:41:26.182851/update_server]:end send upate msg!
+[2024-07-27 16:41:26.297576/update_server]:recv updata project
+[2024-07-27 16:41:26.298335/update_server]:get hash db09643c5db9e2ba785d29a78015a859
+[2024-07-27 16:41:26.298422/update_server]:gen hash db09643c5db9e2ba785d29a78015a859
+[2024-07-27 16:41:26.298440/update_server]:upzip updatezip start......
+[2024-07-27 16:41:26.299743/update_server]:upzip updatezip end......

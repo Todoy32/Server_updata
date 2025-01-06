@@ -1,0 +1,16 @@
+[2024-07-27 16:40:49.923129/update_server]:test
+[2024-07-27 16:40:56.140883/update_server]:serfver->type:0,length:3,content:1.0
+[2024-07-27 16:40:56.140977/update_server]:recy check update msg!
+[2024-07-27 16:40:56.141137/update_server]:check version result: can update!
+[2024-07-27 16:40:56.141260/update_server]:reply check verion msg success!
+[2024-07-27 16:41:12.546145/update_server]:serfver->type:0,length:3,content:1.0
+[2024-07-27 16:41:12.546188/update_server]:recy check update msg!
+[2024-07-27 16:41:12.546250/update_server]:check version result: can update!
+[2024-07-27 16:41:12.546436/update_server]:reply check verion msg success!
+[2024-07-27 16:41:26.181635/update_server]:serfver->type:0,length:3,content:1.0
+[2024-07-27 16:41:26.181698/update_server]:recy check update msg!
+[2024-07-27 16:41:26.181760/update_server]:check version result: can update!
+[2024-07-27 16:41:26.181854/update_server]:reply check verion msg success!
+[2024-07-27 16:41:26.227656/update_server]:serfver->type:1,length:13,content:getUpdateFile
+[2024-07-27 16:41:26.227744/update_server]:recv update msg!..........................
+[2024-07-27 16:41:26.228446/update_server]:reply update msg success!...................

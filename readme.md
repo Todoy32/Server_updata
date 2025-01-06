@@ -1,0 +1,1052 @@
+“磨刀不误砍柴工”，先把各个功能模块学习一遍，再写代码。
+
+
+
+### cmake
+
+1、把CMakeLists.txt放在和C语言文件同一个文件夹中
+
+2、在这个文件夹中创建build文件夹
+
+3、在build中配置文件`sudo cmake ..`   `make`
+
+4、在build中执行功能
+
+
+
+`CMakeLists.txt`
+
+```cmake
+#cmake的最低版本要求为3.0.0
+cmake_minimum_required(VERSION 3.0.0)
+#定义项目名称为server，版本为0.0.1 指定语言为c语言
+project(Server VERSION 0.1.0 LANGUAGES C)
+
+#设置用于编译C代码的编译器为gcc。这通常不是必需的，因为CMake会自动检测系统上的编译器。
+set(CMAKE_C_COMPILER /usr/bin/gcc)
+#引入CTest模块，CTest是一个测试框架，用于管理并运行测试。
+include(CTest)
+#启用项目的测试功能。一旦启用，就可以在项目中添加测试目标。
+enable_testing()
+
+#指示CMake寻找PkgConfig工具。PkgConfig用于查询其他库的编译和链接信息。
+find_package(PkgConfig REQUIRED)
+#使用PkgConfig检查glib-2.0库的存在。如果找到，它将设置变量GLIB_INCLUDE_DIRS和GLIB_LIBRARIES。
+pkg_check_modules(GLIB glib-2.0)
+#将GLib的头文件目录添加到项目的搜索路径中，以便编译器可以找到GLib相关的头文件。
+include_directories(${GLIB_INCLUDE_DIRS})
+
+#创建一个可执行目标“Server”，源代码文件为main.c。
+add_executable(Server main.c)
+#链接GLib库到“Server”可执行文件。这样在编译时会链接所需的GLib库。
+target_link_libraries(Server ${GLIB_LIBRARIES})
+
+#设置CPack（CMake的打包工具）使用的项目名称，这里取自项目定义中的PROJECT_NAME。
+set(CPACK_PROJECT_NAME ${PROJECT_NAME})
+#设置CPack使用的项目版本，同样从项目定义中获取
+set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})
+#引入CPack模块，允许使用CMake进行软件包的创建
+include(CPack)
+```
+
+一般把头文件放入本地文件夹`inc`中，比如`test.h`和`test.c`
+
+添加头文件，也就是添加包含头文件的目录，cmakelists文件所在目录为当前目录
+
+```cmake
+include_directories("./inc")
+```
+
+编译时需要添加对应的c文件
+
+```cmake
+add_executable(Server main.c test.c)
+```
+
+
+
+### **tcp-epoll**
+
+文件头和文件头信息分成了两部分发送，epoll难以处理分段传输
+
+**client（用于测试连接）**
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/types.h>
+#include <sys/socket.h> //posix网络编程
+#include <strings.h>
+#include <pthread.h>
+#include<signal.h>
+#define PORT 6789
+#define SERVER_IP "127.0.0.1"
+
+int client_fd;
+char* msg=NULL;
+char* send_msg=NULL;
+
+//在子线程发消息，主线程收消息
+void* sendMessage(void* parame){
+    int clientFd = *(int *) parame;
+     send_msg=calloc(1,128);
+    while(1){
+        bzero(send_msg,128);
+        printf("请发送消息：");
+        fgets(send_msg,128,stdin);
+        size_t t=send(clientFd,send_msg,strlen(send_msg),0);
+        if(t>0){
+            printf("给客户端%d发送了%ld字节数据！\n",clientFd,t);
+        }
+    }
+}
+
+//因为有while循环，用CTRL+C结束，释放资源
+void signalHandler(int signum){
+    printf("Received Ctrl+C, cleaning up...\n");
+    close(client_fd);
+    free(msg);
+    free(send_msg);
+    exit(0);
+}
+
+int main(int argc, char const *argv[])
+{
+   
+    //套接字、地址
+    client_fd=socket(AF_INET,SOCK_STREAM,0);
+    if(client_fd==-1){
+        perror("ERROR socket");
+        return -1;
+    }
+    struct sockaddr_in server_addr={0};
+    int addr_size=sizeof(server_addr);
+    server_addr.sin_family=AF_INET;
+    server_addr.sin_addr.s_addr=inet_addr(SERVER_IP);
+    server_addr.sin_port=htons(PORT);
+
+    //连接server
+    int ret_con=connect(client_fd,(struct sockaddr*)&server_addr,addr_size);
+    if(ret_con==-1){
+        perror("ERROR connect");
+        exit(0);
+    }else{
+        printf("connect success\n");
+    }
+
+    //用线程发消息
+    pthread_t t_send_message;
+    pthread_create(&t_send_message,NULL,sendMessage,(void*)&client_fd);
+
+    //接收消息
+     msg=calloc(1,128);
+    while (1)
+    {
+        bzero(msg,128);
+        ssize_t t=recv(client_fd,msg,128,0);
+        if(t==0){
+            perror("connection has been disconnected ");
+            exit(0);
+        }
+        printf("\n接受到%d的消息:%s\n",client_fd,msg);
+    }
+    signal(SIGINT, signalHandler);
+    close(client_fd);
+    free(msg);
+    free(send_msg);
+    return 0;
+}
+
+```
+
+
+
+**server**
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <arpa/inet.h>
+#include <sys/types.h>
+#include <sys/socket.h> //posix网络编程
+#include <strings.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/epoll.h>
+#include<signal.h>
+#define PORT 6789
+
+int server_fd;
+int client_fd;
+
+void signalHandler(int signum){
+     printf("Received Ctrl+C, cleaning up...\n");
+     close(server_fd);
+     exit(0);
+}
+
+int main(int argc, char const *argv[])
+{
+    //起手式：套接字、地址、二者绑定
+    server_fd = socket(AF_INET,SOCK_STREAM,0);
+    if (server_fd==-1)
+    {
+        perror("ERROR socket");
+        return -1;
+    }
+
+    struct sockaddr_in server_addr = {0};
+    int addr_size = sizeof(server_addr);
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = htonl(INADDR_ANY); 
+    server_addr.sin_port = htons(PORT);
+
+    int ret_bind = bind(server_fd, (struct sockaddr*) &server_addr, addr_size);
+    if (ret_bind==-1)
+    {
+      perror("ERROR bind");
+      return -1;
+    }
+
+    //监听，等待连接
+    int ret_listen = listen(server_fd,10);//10 最大连接
+    if (ret_listen==-1)
+    {
+      perror("监听失败！");
+      return -1;
+    }
+
+    //用epoll管理连接的服务器
+    int epoll = epoll_create(100);
+    if (epoll==-1)
+    {
+      perror("ERROR epoll_create");
+      return -1;
+    }
+    struct epoll_event event = {
+      .events = EPOLLIN,
+      .data.fd = server_fd
+    };
+    epoll_ctl(epoll,EPOLL_CTL_ADD,server_fd,&event);
+    struct epoll_event epevs[1024];//epevs
+
+    while (1)
+    { 
+        int retVal = epoll_wait(epoll,epevs,1024,1000);//每一秒把监测到的客户端连接状态处理一次
+        
+        if (retVal==-1)
+      {
+        perror("ERROR epoll_wait");
+        return -1;
+      }else if (retVal==0)
+      {
+        continue;
+      }else if (retVal>0)
+      {
+        for (int i = 0; i < retVal; i++){
+            int curFd = epevs[i].data.fd;
+             if (server_fd ==  curFd )
+          {
+           // 监听的文件描述符有数据达到，有客户端连接
+              struct sockaddr_in cliaddr;
+              int len = sizeof(cliaddr);
+              int cfd = accept(server_fd, (struct sockaddr *)&cliaddr, &len);
+
+              struct epoll_event epev;
+              epev.events = EPOLLIN;  // 后面可能会变成 EPOLLOUT
+              epev.data.fd = cfd;
+              epoll_ctl(epoll, EPOLL_CTL_ADD, cfd, &epev);
+          }else{
+            if(epevs[i].events & EPOLLOUT) {
+                    continue;
+            }  
+            char buf[1024] = {0};
+              int len = read(curFd, buf, sizeof(buf));
+              if(len == -1) {
+                  perror("read");
+                  exit(-1);
+              } else if(len == 0) {
+                  printf("client %d closed...\n",curFd);
+                  epoll_ctl(epoll, EPOLL_CTL_DEL, curFd, NULL); // 在红黑树中删除
+                  close(curFd);
+              } else if(len > 0) {
+                  printf("接收到客户端%d的信息：%s",curFd,buf);             
+                  //给发送消息的客户端回消息
+                  char* receive_message="server has received the message.";
+                  send(curFd,receive_message,strlen(receive_message),0);
+                  //write(curFd, buf, strlen(buf) + 1);
+            }
+          }
+        }
+      }
+    }
+    signal(SIGINT,signalHandler);
+    close(server_fd);
+    return 0;
+}
+```
+
+
+
+
+
+### 线程池
+
+1、创建线程池
+
+```c
+void* func(gpointer data,gpointer user_data){
+    //function
+}
+
+GThreadPool* g_thread_pool_new (GFunc func,
+                                gpointer data,
+                                guint n_threads,
+                                gboolean cleanup_threads,
+                                gboolean detached_threads);
+```
+
+参数解释：
+
+- `func`：这是一个指向`GFunc`类型的函数指针，表示当线程从线程池中取出任务时要执行的任务函数。`GFunc`是一个回调函数类型，其签名是`gpointer function(gpointer data)`。
+- `data`：这是传递给任务函数`func`的用户数据。通常用来携带任务相关的数据或参数。
+- `n_threads`：这是一个`guint`类型，表示线程池中线程的最大数量。如果线程池中运行的线程少于这个数量，那么当有新任务加入时，线程池会启动新的线程来处理任务，直到达到最大数量。
+- `cleanup_threads`：这是一个`gboolean`类型，如果设为`TRUE`，那么当最后一个任务完成并且线程池被销毁时，所有的线程都会被加入到主线程的事件循环中进行清理。
+- `detached_threads`：这也是一个`gboolean`类型，如果设为`TRUE`，那么线程池中的线程将不会被加入到主线程的事件循环中进行清理，这意味着线程将独立运行直到它们自然结束或被其他方式终止。
+
+返回值：
+
+- `g_thread_pool_new`函数返回一个指向新创建的`GThreadPool`结构体的指针。如果由于某种原因无法创建线程池，函数将返回`NULL`。
+
+
+
+2、创建子线程
+
+```c
+gboolean g_thread_pool_push (GThreadPool *pool,
+                             gpointer user_data,
+                             guint size);
+```
+
+参数解释：
+
+- `pool`：这是指向`GThreadPool`结构的指针，代表你想要添加任务的线程池。
+- `data`：这是指向要传递给任务函数的数据的指针。这个数据会被传递给线程池中线程调用的任务函数。
+- `size`：这是`data`参数的大小（以字节为单位）。这个信息被用于内存管理，确保数据在任务执行完毕前不会被回收。
+
+返回值：
+
+- 如果任务成功添加到线程池，则返回`TRUE`；如果线程池已经停止或者正在停止过程中，或者线程池中的线程数量已经达到最大限制并且没有线程可用，那么返回`FALSE`。
+
+
+
+server.c
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <arpa/inet.h>
+#include <sys/types.h>
+#include <sys/socket.h> //posix网络编程
+#include <strings.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/epoll.h>
+#include<signal.h>
+#include<glib.h>
+#include"version_data.h"
+#define PORT 6789
+
+int server_fd;
+int epoll ;
+int curFd ;
+GThreadPool* t_pool;
+char buf[1024] = {0};
+struct epoll_event epevs[1024];//epevs
+
+//线程池函数，收信息
+  void* recvMessage(gpointer data,gpointer user_data){
+    int client_fd = GPOINTER_TO_INT(data);
+   printf("接收到客户端%d的信息：%s", client_fd, buf);
+      // 给发送消息的客户端回消息
+      char *receive_message = "server has received the message.";
+      send(client_fd, receive_message, strlen(receive_message), 0);
+}
+
+
+//ctrl+c关闭进程释放资源
+void signalHandler(int signum){
+     printf("Received Ctrl+C, cleaning up...\n");
+     close(server_fd);
+     exit(0);
+}
+
+int main(int argc, char const *argv[])
+{
+  // 起手式：套接字、地址、二者绑定
+  server_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (server_fd == -1)
+  {
+    perror("ERROR socket");
+    return -1;
+  }
+
+  struct sockaddr_in server_addr = {0};
+  int addr_size = sizeof(server_addr);
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  server_addr.sin_port = htons(PORT);
+
+  int ret_bind = bind(server_fd, (struct sockaddr *)&server_addr, addr_size);
+  if (ret_bind == -1)
+  {
+    perror("ERROR bind");
+    return -1;
+  }
+
+  // 监听，等待连接
+  int ret_listen = listen(server_fd, 10); // 10 最大连接
+  if (ret_listen == -1)
+  {
+    perror("监听失败！");
+    return -1;
+  }
+
+  // 用epoll管理连接的服务器
+  epoll = epoll_create(100);
+  if (epoll == -1)
+  {
+    perror("ERROR epoll_create");
+    return -1;
+  }
+  struct epoll_event event = {
+      .events = EPOLLIN,
+      .data.fd = server_fd};
+  epoll_ctl(epoll, EPOLL_CTL_ADD, server_fd, &event);
+
+  signal(SIGINT, signalHandler);
+  // 创建线程池
+  t_pool = g_thread_pool_new((GFunc)recvMessage, NULL, 10, FALSE, NULL);
+
+  while (1)
+  {
+    int retVal = epoll_wait(epoll, epevs, 1024, 3000); // 每一秒把监测到的客户端连接状态处理一次
+
+    if (retVal == -1)
+    {
+      perror("ERROR epoll_wait");
+      return -1;
+    }
+    else if (retVal == 0)
+    {
+      continue;
+    }
+    else if (retVal > 0)
+    {
+      for (int i = 0; i < retVal; i++)
+      {
+        curFd = epevs[i].data.fd;
+        if (server_fd == curFd)
+        {
+          // 监听的文件描述符有数据达到，有客户端连接
+          struct sockaddr_in cliaddr;
+          int len = sizeof(cliaddr);
+          int cfd = accept(server_fd, (struct sockaddr *)&cliaddr, &len);
+
+          struct epoll_event epev;
+          epev.events = EPOLLIN; // 后面可能会变成 EPOLLOUT
+          epev.data.fd = cfd;
+          epoll_ctl(epoll, EPOLL_CTL_ADD, cfd, &epev);
+        }
+        else
+        {
+          if (epevs[i].events & EPOLLOUT)
+          {
+            continue;
+          }
+          memset(buf, 0, 1024);
+          int len = recv(curFd, buf, sizeof(buf), 0);
+          if (len == -1)
+          {
+            perror("read");
+            exit(-1);
+          }
+          else if (len == 0)
+          {
+            printf("client %d closed...\n", curFd);
+            epoll_ctl(epoll, EPOLL_CTL_DEL, curFd, NULL); // 在红黑树中删除
+            close(curFd);
+          }
+          else if (len > 0)
+          {
+            g_thread_pool_push(t_pool, GINT_TO_POINTER(curFd), NULL);
+          }
+        }
+      }
+    }
+  }
+
+  close(server_fd);
+  return 0;
+}
+
+```
+
+这里并没有使用线程池创建时和加入线程时传入的两个参数，使用的是全局变量
+
+这段代码有一个问题，我把len>0的情况放在了线程池中，尝试把其他两种情况都放进线程池中，发现实际运行时会有很多问题，比如客户端第一次向服务器发送消息会被吞掉，同时关闭客户端服务端会出现报错，并关闭服务端
+
+
+
+
+
+### 日志处理
+
+1、日志处理函数
+
+```c
+static void myLogHandler(const gchar* log_domain,GLogLevelFlags log_level,const gchar* message,gpointer user_data){
+    //获取时间
+    struct timeval tv;
+    gettimeofday(&tv,NULL);
+    time_t now=time(NULL);
+    struct tm* local_time=localtime(&now);
+    char time_str[64];
+    //格式化日期和时间
+    strftime(time_str,sizeof(time_str),"%Y-%m-%d %H:%M:%S",local_time);
+     snprintf(time_str, sizeof(time_str), "%04d-%02d-%02d %02d:%02d:%02d.%ld",
+              local_time->tm_year + 1900, local_time->tm_mon + 1, local_time->tm_mday,
+              local_time->tm_hour, local_time->tm_min, local_time->tm_sec,
+              tv.tv_usec); // 将微秒转换为两位数
+    g_mutex_lock(log_lock);
+    printf("向服务器写入数据\n");
+    fprintf(log_fd, "[%s/%s]: %s\n", time_str, log_domain, message);
+    g_mutex_unlock(log_lock);
+}
+
+ g_log_set_handler(LOG_DOMAIN,LOG_LEVEL,myLogHandler,NULL);//绑定日志函数
+```
+
+2、日志锁
+
+```c
+static GMutex* log_lock=NULL;
+  log_lock=g_mutex_new();
+ g_mutex_lock(log_lock);
+ g_mutex_unlock(log_lock);
+```
+
+
+
+### 版本信息收发
+
+```c
+typedef struct Version_data
+{
+    int type;
+    int len;
+    char* content;
+}version_data;
+
+version_data* recvVersionMessage(int client_fd);
+void sendVersionMessage(int client_fd,version_data* ver_msg);
+
+```
+
+```c
+#include"version_data.h"
+#include<stdio.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include<stdlib.h>
+version_data* recvVersionMessage(int client_fd){
+    version_data* recv_version_message=malloc(sizeof(version_data));
+    printf("正在接收版本信息……\n");
+    if(recv(client_fd,recv_version_message,sizeof(version_data),0)<0){
+        perror("接收版本信息失败");
+        exit(EXIT_FAILURE);
+    }
+    recv_version_message->content=malloc(recv_version_message->len);
+    int remaining_len=recv_version_message->len;
+    while(remaining_len>0){
+        int ret_recv=recv(client_fd,recv_version_message->content+(recv_version_message->len-remaining_len),sizeof(version_data),0);
+        if(ret_recv<0){
+        perror("接收版本信息失败");
+        exit(EXIT_FAILURE);
+    }
+    remaining_len-=ret_recv;
+    }
+    return recv_version_message;
+}
+
+
+
+void sendVersionMessage(int client_fd,version_data* ver_msg){
+ printf("正在发送版本信息……\n");
+    if(send(client_fd,ver_msg,sizeof(version_data),0)<0){
+        perror("发送版本信息失败");
+        exit(EXIT_FAILURE);
+    }
+    int remaining_len=ver_msg->len;
+    while(remaining_len>0){
+        int ret_send=send(client_fd,ver_msg->content+(ver_msg->len-remaining_len),sizeof(version_data),0);
+        if(ret_send<0){
+        perror("发送版本信息失败");
+        exit(EXIT_FAILURE);
+    }
+    remaining_len-=ret_send;
+    }
+}
+```
+
+
+
+### `tcp-select`
+
+server
+
+```c
+
+```
+
+
+
+
+
+
+
+
+
+### ini文件
+
+INI 文件是一种简单的配置文件格式，通常用于存储软件应用程序的配置信息。INI 文件的名字来源于 Windows 的初始化文件（Initialization File），但现在已经被广泛应用于各种平台和应用程序中。
+
+#### INI 文件的基本结构
+
+INI 文件通常具有以下特点：
+
+1. **节（Section）**:
+   - 以方括号 `[ ]` 开始的行定义一个节。
+   - 例如：`[Settings]` 定义了一个名为 `Settings` 的节。
+
+2. **键值对（Key-Value Pairs）**:
+   - 每个节可以包含一个或多个键值对。
+   - 键值对通常格式为 `key = value`。
+   - 例如：`color = blue`。
+
+3. **注释**:
+   - 注释可以出现在任何位置，通常以分号 `;` 或井号 `#` 开始。
+
+#### 示例 INI 文件
+
+```ini
+[Window]
+left = 0
+top = 0
+width = 800
+height = 600
+
+[Font]
+name = Times New Roman
+size = 12
+
+[Colors]
+background = #ffffff
+foreground = #000000
+highlight = #ff0000
+```
+
+
+
+在 C 语言中，读取和写入 INI 文件通常涉及到文件 I/O 和字符串处理。这里提供一个简单的示例，说明如何读取和写入 INI 文件。
+
+#### 读取 INI 文件
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct {
+    char *name;
+    char *value;
+} KeyValue;
+
+typedef struct {
+    char *name;
+    KeyValue *keyValues;
+    size_t keyCount;
+} Section;
+
+typedef struct {
+    Section *sections;
+    size_t sectionCount;
+} IniFile;
+
+IniFile *readIniFile(const char *filename) {
+    IniFile *ini = NULL;
+    FILE *file = fopen(filename, "r");
+    if (file) {
+        ini = (IniFile *)malloc(sizeof(IniFile));
+        ini->sections = NULL;
+        ini->sectionCount = 0;
+
+        char line[256];
+        Section *currentSection = NULL;
+        while (fgets(line, sizeof(line), file)) {
+            if (line[0] == '[' && line[strlen(line) - 2] == ']') {
+                if (currentSection) {
+                    currentSection->keyValues = realloc(currentSection->keyValues, currentSection->keyCount * sizeof(KeyValue));
+                }
+                currentSection = (Section *)malloc(sizeof(Section));
+                currentSection->name = strdup(line + 1);
+                currentSection->name[strlen(currentSection->name) - 1] = '\0';
+                currentSection->keyValues = NULL;
+                currentSection->keyCount = 0;
+                ini->sections = realloc(ini->sections, (ini->sectionCount + 1) * sizeof(Section));
+                ini->sections[ini->sectionCount++] = *currentSection;
+            } else if (currentSection && strchr(line, '=') && !strchr(line, ';')) {
+                KeyValue keyValue;
+                char *key = strtok(line, "=");
+                char *value = strtok(NULL, "=");
+                keyValue.name = strdup(key);
+                keyValue.value = strdup(value);
+                currentSection->keyValues = realloc(currentSection->keyValues, (currentSection->keyCount + 1) * sizeof(KeyValue));
+                currentSection->keyValues[currentSection->keyCount++] = keyValue;
+            }
+        }
+        fclose(file);
+    }
+    return ini;
+}
+
+void printIniFile(IniFile *ini) {
+    for (size_t i = 0; i < ini->sectionCount; ++i) {
+        Section *section = &ini->sections[i];
+        printf("[%s]\n", section->name);
+        for (size_t j = 0; j < section->keyCount; ++j) {
+            KeyValue *kv = &section->keyValues[j];
+            printf("%s = %s\n", kv->name, kv->value);
+        }
+        printf("\n");
+    }
+}
+
+int main() {
+    IniFile *ini = readIniFile("example.ini");
+    if (ini) {
+        printIniFile(ini);
+        // 清理内存
+        for (size_t i = 0; i < ini->sectionCount; ++i) {
+            Section *section = &ini->sections[i];
+            for (size_t j = 0; j < section->keyCount; ++j) {
+                KeyValue *kv = &section->keyValues[j];
+                free(kv->name);
+                free(kv->value);
+            }
+            free(section->keyValues);
+            free(section->name);
+        }
+        free(ini->sections);
+        free(ini);
+    }
+    return 0;
+}
+```
+
+#### 写入 INI 文件
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+void writeIniFile(const IniFile *ini, const char *filename) {
+    FILE *file = fopen(filename, "w");
+    if (file) {
+        for (size_t i = 0; i < ini->sectionCount; ++i) {
+            const Section *section = &ini->sections[i];
+            fprintf(file, "[%s]\n", section->name);
+            for (size_t j = 0; j < section->keyCount; ++j) {
+                const KeyValue *kv = &section->keyValues[j];
+                fprintf(file, "%s = %s\n", kv->name, kv->value);
+            }
+            fprintf(file, "\n");
+        }
+        fclose(file);
+    }
+}
+
+int main() {
+    IniFile *ini = readIniFile("example.ini");
+    if (ini) {
+        writeIniFile(ini, "example_copy.ini");
+        // 清理内存
+        for (size_t i = 0; i < ini->sectionCount; ++i) {
+            Section *section = &ini->sections[i];
+            for (size_t j = 0; j < section->keyCount; ++j) {
+                KeyValue *kv = &section->keyValues[j];
+                free(kv->name);
+                free(kv->value);
+            }
+            free(section->keyValues);
+            free(section->name);
+        }
+        free(ini->sections);
+        free(ini);
+    }
+    return 0;
+}
+```
+
+#### 注意事项
+
+1. **内存管理**:
+   - 确保为字符串分配足够的内存，并在不再需要时释放这些内存。
+   - 在实际应用中，你可能需要考虑更健壮的内存管理和错误处理机制。
+
+2. **错误处理**:
+   - 在实际应用中，你需要添加更多的错误处理代码，例如检查文件是否可以打开，以及分配内存是否成功。
+
+3. **性能优化**:
+   - 如果你需要处理大型的 INI 文件，可能需要考虑使用更高效的数据结构和算法。
+
+以上示例提供了读取和写入 INI 文件的基本框架。你可以根据自己的需求对其进行扩展和改进。
+
+
+
+### hash值
+
+
+
+
+
+### 压缩与解压
+
+在Linux环境下，使用C语言进行文件的压缩与解压缩通常涉及到使用现有的库，例如zlib或lzma。zlib是最常用的库之一，它支持多种压缩算法，如DEFLATE，而lzma库则专门用于LZMA压缩算法。
+
+下面是使用zlib库进行文件压缩与解压缩的一个简单示例。
+
+#### 安装zlib库
+
+首先，确保你的系统上已经安装了zlib库。如果没有安装，你可以通过包管理器安装它：
+
+```sh
+sudo apt-get install zlib1g-dev  # Debian/Ubuntu
+sudo yum install zlib-devel       # CentOS/RHEL
+```
+
+#### 压缩文件
+
+接下来，我们将编写一个简单的程序来压缩文件。这里我们使用zlib库提供的`deflate`函数来进行压缩。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <zlib.h>
+
+#define BUF_SIZE 1024
+
+// 压缩文件
+int compress_file(const char *input_filename, const char *output_filename) {
+    FILE *in_file = fopen(input_filename, "rb");
+    if (!in_file) {
+        perror("Error opening input file");
+        return 1;
+    }
+
+    FILE *out_file = fopen(output_filename, "wb");
+    if (!out_file) {
+        perror("Error opening output file");
+        fclose(in_file);
+        return 1;
+    }
+
+    z_stream strm;
+    strm.zalloc = Z_NULL;
+    strm.zfree = Z_NULL;
+    strm.opaque = Z_NULL;
+    strm.avail_in = 0;
+    strm.next_in = Z_NULL;
+
+    if (deflateInit(&strm, Z_DEFAULT_COMPRESSION) != Z_OK) {
+        fprintf(stderr, "Error initializing deflate stream\n");
+        fclose(in_file);
+        fclose(out_file);
+        return 1;
+    }
+
+    unsigned char in[BUF_SIZE];
+    unsigned char out[BUF_SIZE];
+
+    while (!feof(in_file)) {
+        size_t have = fread(in, 1, BUF_SIZE, in_file);
+        strm.avail_in = have;
+        strm.next_in = in;
+
+        do {
+            strm.avail_out = BUF_SIZE;
+            strm.next_out = out;
+
+            if (deflate(&strm, Z_FINISH) == Z_STREAM_ERROR) {
+                fprintf(stderr, "Error compressing data\n");
+                fclose(in_file);
+                fclose(out_file);
+                deflateEnd(&strm);
+                return 1;
+            }
+
+            size_t have = BUF_SIZE - strm.avail_out;
+            fwrite(out, 1, have, out_file);
+        } while (strm.avail_out == 0);
+    }
+
+    if (deflateEnd(&strm) != Z_OK) {
+        fprintf(stderr, "Error ending deflate stream\n");
+        fclose(in_file);
+        fclose(out_file);
+        return 1;
+    }
+
+    fclose(in_file);
+    fclose(out_file);
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s input_file output_file\n", argv[0]);
+        return 1;
+    }
+
+    if (compress_file(argv[1], argv[2]) == 0) {
+        printf("Compression successful.\n");
+    } else {
+        printf("Compression failed.\n");
+    }
+
+    return 0;
+}
+```
+
+#### 解压缩文件
+
+接下来，我们将编写一个解压缩文件的程序。这里我们使用zlib库提供的`inflate`函数来进行解压缩。
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <zlib.h>
+
+#define BUF_SIZE 1024
+
+// 解压缩文件
+int decompress_file(const char *input_filename, const char *output_filename) {
+    FILE *in_file = fopen(input_filename, "rb");
+    if (!in_file) {
+        perror("Error opening input file");
+        return 1;
+    }
+
+    FILE *out_file = fopen(output_filename, "wb");
+    if (!out_file) {
+        perror("Error opening output file");
+        fclose(in_file);
+        return 1;
+    }
+
+    z_stream strm;
+    strm.zalloc = Z_NULL;
+    strm.zfree = Z_NULL;
+    strm.opaque = Z_NULL;
+    strm.avail_in = 0;
+    strm.next_in = Z_NULL;
+
+    if (inflateInit(&strm) != Z_OK) {
+        fprintf(stderr, "Error initializing inflate stream\n");
+        fclose(in_file);
+        fclose(out_file);
+        return 1;
+    }
+
+    unsigned char in[BUF_SIZE];
+    unsigned char out[BUF_SIZE];
+
+    while (!feof(in_file)) {
+        size_t have = fread(in, 1, BUF_SIZE, in_file);
+        strm.avail_in = have;
+        strm.next_in = in;
+
+        do {
+            strm.avail_out = BUF_SIZE;
+            strm.next_out = out;
+
+            if (inflate(&strm, Z_NO_FLUSH) == Z_STREAM_ERROR) {
+                fprintf(stderr, "Error decompressing data\n");
+                fclose(in_file);
+                fclose(out_file);
+                inflateEnd(&strm);
+                return 1;
+            }
+
+            size_t have = BUF_SIZE - strm.avail_out;
+            fwrite(out, 1, have, out_file);
+        } while (strm.avail_out == 0);
+    }
+
+    if (inflateEnd(&strm) != Z_OK) {
+        fprintf(stderr, "Error ending inflate stream\n");
+        fclose(in_file);
+        fclose(out_file);
+        return 1;
+    }
+
+    fclose(in_file);
+    fclose(out_file);
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s input_file output_file\n", argv[0]);
+        return 1;
+    }
+
+    if (decompress_file(argv[1], argv[2]) == 0) {
+        printf("Decompression successful.\n");
+    } else {
+        printf("Decompression failed.\n");
+    }
+
+    return 0;
+}
+```
+
+#### 编译和运行
+
+为了编译这些程序，你需要链接zlib库。你可以使用以下命令来编译这两个程序：
+
+```sh
+gcc -o compress compress.c -lz
+gcc -o decompress decompress.c -lz
+```
+
+然后，你可以运行这些程序来压缩和解压缩文件：
+
+```sh
+./compress input.txt compressed.dat
+./decompress compressed.dat output.txt
+```
+
+这里，`input.txt` 是你要压缩的原始文件，`compressed.dat` 是压缩后的文件，而`output.txt` 是解压缩后的文件。
+
+请注意，这些示例程序假定输入文件可以完全读入内存，并且使用了固定的缓冲区大小。在实际应用中，你可能需要考虑更复杂的错误处理和内存管理策略。
